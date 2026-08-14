@@ -1,0 +1,4 @@
+playwright>=1.40
+pandas>=2.0
+openpyxl>=3.1
+xlrd>=2.0          # lee los .xls antiguos que exporta eGob
