@@ -1,0 +1,72 @@
+name: Descarga diaria de eGob
+
+on:
+  schedule:
+    - cron: "0 5 * * *"        # 00:00 en Ecuador (UTC-5)
+  workflow_dispatch:
+    inputs:
+      todas:
+        description: "Bajar el detalle de todas las subpartidas con movimiento"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: egob
+  cancel-in-progress: false
+
+jobs:
+  actualizar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Instalar dependencias
+        run: |
+          pip install playwright pandas openpyxl xlrd
+          playwright install --with-deps chromium
+
+      - name: Recuperar el historico de la corrida anterior
+        run: |
+          mkdir -p datos/detalle
+          if [ -f partidas_anterior.json ]; then
+            cp partidas_anterior.json datos/partidas_anterior.json
+          fi
+          echo "archivos de detalle heredados: $(ls -1 datos/detalle | wc -l)"
+
+      - name: Descargar desde eGob
+        env:
+          EGOB_USUARIO: ${{ secrets.EGOB_USUARIO }}
+          EGOB_CLAVE: ${{ secrets.EGOB_CLAVE }}
+        run: python 1_descargar.py --lote ${{ inputs.todas && '--todas' || '' }}
+
+      - name: Generar el tablero
+        run: python 2_generar.py --datos datos --salida datos.json --html index.html
+
+      - name: Guardar capturas
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: capturas-${{ github.run_number }}
+          path: capturas/
+          retention-days: 14
+
+      - name: Publicar
+        run: |
+          cp datos/partidas_anterior.json partidas_anterior.json
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          # datos/detalle/ se versiona a proposito: es la memoria historica de
+          # certificaciones. Sin el, cada corrida solo veria lo que cambio esa
+          # noche y el tablero perderia todos los proyectos anteriores.
+          git add index.html datos.json partidas_anterior.json datos/detalle
+          git diff --staged --quiet || git commit -m "Datos al $(TZ=America/Guayaquil date '+%Y-%m-%d')"
+          git push
