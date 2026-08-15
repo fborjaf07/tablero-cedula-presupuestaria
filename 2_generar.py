@@ -118,7 +118,8 @@ def certificaciones(bloque):
     """
     grupos = defaultdict(lambda: {
         "certificacion": "", "beneficiario": "", "concepto": "",
-        "fecha": "", "certificado": 0.0, "comprometido": 0.0,
+        "fecha": "", "ultimo": "", "f_comprometido": "", "f_devengado": "",
+        "certificado": 0.0, "comprometido": 0.0,
         "devengado": 0.0, "pagado": 0.0, "documentos": [], "movimientos": 0,
     })
     for m in bloque["movimientos"]:
@@ -130,6 +131,16 @@ def certificaciones(bloque):
         g["movimientos"] += 1
         if not g["fecha"] or (m["fecha"] and m["fecha"] < g["fecha"]):
             g["fecha"] = m["fecha"]
+        # el ultimo movimiento es lo que marca si el expediente sigue vivo
+        if m["fecha"] and m["fecha"] > g["ultimo"]:
+            g["ultimo"] = m["fecha"]
+        # primera vez que aparece cada etapa, para medir cuanto tardo
+        if m["comprometido"] > 0 and (not g["f_comprometido"]
+                                      or m["fecha"] < g["f_comprometido"]):
+            g["f_comprometido"] = m["fecha"]
+        if m["devengado"] > 0 and (not g["f_devengado"]
+                                   or m["fecha"] < g["f_devengado"]):
+            g["f_devengado"] = m["fecha"]
         if m["beneficiario"] and not g["beneficiario"]:
             g["beneficiario"] = m["beneficiario"]
         if m["concepto"] and not g["concepto"]:
@@ -150,12 +161,13 @@ def certificaciones(bloque):
 
 # ------------------------------------------------------------------ armado
 
-def armar(partidas, bloques):
+def armar(partidas, bloques, fuentes=None):
     """Cuelga subpartidas y detalle de cada partida general."""
     porc = defaultdict(list)
     for s in partidas["subpartidas"]:
         porc[s["padre"]].append(s)
 
+    fuentes = fuentes or {}
     grupos = []
     for p in partidas["partidas"]:
         subs = []
@@ -165,6 +177,7 @@ def armar(partidas, bloques):
             subs.append({
                 "codigo": s["codigo"],
                 "denominacion": s["nombre"],
+                "fuente": fuentes.get(s["codigo"], SIN_FUENTE),
                 "codificado": s["codificado"],
                 "certificado": s["certificado"],
                 "comprometido": s["comprometido"],
@@ -222,6 +235,43 @@ def armar(partidas, bloques):
     return grupos
 
 
+def cargar_fuentes(ruta="fuentes.json"):
+    """Catalogo de fuente de financiamiento por codigo de subpartida.
+
+    eGob no la expone en la consulta presupuestaria, asi que se mantiene
+    aparte, en fuentes.json. Si el archivo no esta, todo queda como
+    "Sin fuente asignada" y el tablero sigue funcionando igual.
+    """
+    if not os.path.exists(ruta):
+        return {}
+    with open(ruta, encoding="utf-8") as f:
+        return json.load(f)
+
+
+SIN_FUENTE = "Sin fuente asignada"
+
+
+def resumir_fuentes(grupos):
+    """Agrega las cifras por fuente, sumando desde las subpartidas."""
+    campos = ["codificado", "certificado", "comprometido", "devengado",
+              "pagado", "saldo_certificar", "saldo_devengar"]
+    acum = {}
+    for g in grupos:
+        for s in g["partidas"]:
+            f = s.get("fuente") or SIN_FUENTE
+            a = acum.setdefault(f, {k: 0.0 for k in campos})
+            a["n"] = a.get("n", 0) + 1
+            for k in campos:
+                a[k] += s.get(k, 0.0)
+    salida = []
+    for nombre, a in acum.items():
+        fila = {"fuente": nombre, "n": a["n"]}
+        fila.update({k: round(a[k], 2) for k in campos})
+        salida.append(fila)
+    salida.sort(key=lambda x: -x["codificado"])
+    return salida
+
+
 def resumir(grupos):
     campos = ["asignacion", "reformas", "codificado", "certificado",
               "comprometido", "devengado", "pagado", "saldo_certificar",
@@ -237,6 +287,75 @@ def resumir(grupos):
     return {"todo": agregar(grupos),
             "computable": agregar([g for g in grupos if g["computable"]]),
             "no_computable": agregar([g for g in grupos if not g["computable"]])}
+
+
+MESES_ES = ["", "enero", "febrero", "marzo", "abril", "mayo", "junio",
+            "julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre"]
+
+
+def resumir_meses(grupos, bloques):
+    """Flujo mensual real, tomado de la fecha de cada movimiento.
+
+    No sirve fechar por la certificacion: una obra certificada en enero y
+    devengada en julio no es devengo de enero. Cada movimiento cuenta en el
+    mes en que ocurrio, que es lo que permite ver el ritmo de ejecucion.
+
+    El codificado no aparece aqui a proposito: el Partida XLS solo da la
+    foto de hoy, asi que no hay forma de reconstruir el presupuesto vigente
+    de meses anteriores sin inventarlo.
+    """
+    campos = ("certificado", "comprometido", "devengado", "pagado")
+    # de que partida general cuelga cada subpartida
+    padre = {}
+    for g in grupos:
+        for s in g["partidas"]:
+            padre[s["codigo"]] = (g["codigo"], g["denominacion"])
+
+    meses = defaultdict(lambda: {k: 0.0 for k in campos})
+    porpar = defaultdict(lambda: defaultdict(lambda: {k: 0.0 for k in campos}))
+
+    for cod, b in bloques.items():
+        pcod, pnom = padre.get(cod, (cod[:8], ""))
+        for m in b["movimientos"]:
+            mes = (m["fecha"] or "")[:7]
+            if len(mes) != 7:
+                continue
+            r = meses[mes]
+            r["n"] = r.get("n", 0) + 1
+            if m["certificado"] < 0 or m["comprometido"] < 0:
+                r["anulaciones"] = r.get("anulaciones", 0) + 1
+            p = porpar[mes][pcod]
+            p["denominacion"] = pnom
+            for k in campos:
+                r[k] += m[k]
+                p[k] += m[k]
+
+    salida = []
+    acum = {k: 0.0 for k in campos}
+    for mes in sorted(meses):
+        r = meses[mes]
+        for k in campos:
+            acum[k] += r[k]
+        aa, mm = mes.split("-")
+        partidas = []
+        for pcod, p in porpar[mes].items():
+            fila = {"codigo": pcod, "denominacion": p["denominacion"]}
+            fila.update({k: round(p[k], 2) for k in campos})
+            if any(abs(fila[k]) > 0.005 for k in campos):
+                partidas.append(fila)
+        partidas.sort(key=lambda x: -abs(x["certificado"]) - abs(x["devengado"]))
+        fila = {
+            "mes": mes,
+            "etiqueta": f"{MESES_ES[int(mm)]} {aa}",
+            "corto": MESES_ES[int(mm)][:3].capitalize(),
+            "movimientos": r.get("n", 0),
+            "anulaciones": r.get("anulaciones", 0),
+            "partidas": partidas,
+        }
+        fila.update({k: round(r[k], 2) for k in campos})
+        fila.update({"acum_" + k: round(acum[k], 2) for k in campos})
+        salida.append(fila)
+    return salida
 
 
 def proyectos_desde_detalle(grupos):
@@ -256,6 +375,9 @@ def proyectos_desde_detalle(grupos):
                     "beneficiario": c["beneficiario"],
                     "certificacion": c["certificacion"],
                     "fecha": c["fecha"],
+                    "ultimo": c["ultimo"],
+                    "f_comprometido": c["f_comprometido"],
+                    "f_devengado": c["f_devengado"],
                     "saldo": False,
                     "codificado": c["certificado"],
                     "certificado": c["certificado"],
@@ -339,7 +461,7 @@ def construir(carpeta_datos):
     bloques, n_archivos, avisos = cargar_detalles(
         os.path.join(carpeta_datos, "detalle"))
 
-    grupos = armar(partidas, bloques)
+    grupos = armar(partidas, bloques, cargar_fuentes())
     proyectos = proyectos_desde_detalle(grupos)
     adjuntar_top(grupos, proyectos)
 
@@ -386,6 +508,8 @@ def construir(carpeta_datos):
         "discrepancias": [],
         "total": total,
         "resumen": resumir(grupos),
+        "financiamiento": resumir_fuentes(grupos),
+        "mensual": resumir_meses(grupos, bloques),
         "grupos": grupos,
         "proyectos": proyectos,
         "resumen_proyectos": resumir_proyectos(proyectos),
