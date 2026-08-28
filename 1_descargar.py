@@ -301,6 +301,7 @@ def bajar_con_flechas(page, tope=2000):
         # La tabla trae cada tramo del servidor y tarda: si se corta la
         # espera demasiado pronto, se da por terminada a mitad de camino.
         page.wait_for_timeout(1500)
+        cerrar_aviso(page)
         esperar_procesando(page, 30)
         page.wait_for_timeout(1000)
         filas = page.locator("tbody tr").count()
@@ -352,6 +353,58 @@ def bajar_hasta_el_final(page):
     return n
 
 
+AVISO = ("div.modal.in, div.modal[style*='display: block'], "
+         "div[role=dialog]:visible, .modal-dialog:visible")
+
+
+def cerrar_aviso(page):
+    """Cierra el aviso de eGob si esta en pantalla.
+
+    Cuando la tabla se recarga, la aplicacion descarta los identificadores
+    de la carga anterior. Si el script marca o exporta con los viejos, eGob
+    responde con un modal: "Esta intentando leer los registros ... del
+    modelo 'Cedula presupuestaria' que ya no existen". Se abre con
+    data-backdrop static -no se cierra pulsando fuera- y como queda por
+    encima intercepta todos los clics siguientes. De ahi los reintentos que
+    terminan en tiempo agotado.
+
+    Devuelve True si habia un aviso y se cerro.
+    """
+    dlg = page.locator(AVISO).first
+    try:
+        if not dlg.count() or not dlg.is_visible():
+            return False
+    except Exception:
+        return False
+
+    try:
+        texto = (dlg.inner_text() or "").strip().replace(chr(10), " ")[:160]
+        log(f"   aviso de eGob: {texto}")
+    except Exception:
+        pass
+
+    for sel in ["button:has-text('ACEPTAR')", "button:has-text('Aceptar')",
+                "button:has-text('Cerrar')", "button.close",
+                "[data-dismiss=modal]", ".modal-footer button"]:
+        b = dlg.locator(sel).first
+        try:
+            if b.count() and b.is_visible():
+                b.click(timeout=8_000)
+                break
+        except Exception:
+            continue
+    else:
+        page.keyboard.press("Escape")
+
+    try:
+        dlg.wait_for(state="hidden", timeout=10_000)
+    except Exception:
+        log("   ! el aviso no se cerro")
+        return True
+    page.wait_for_timeout(600)
+    return True
+
+
 def esperar_procesando(page, segundos=60):
     """Espera a que desaparezca la capa de 'Processing…'.
 
@@ -359,6 +412,7 @@ def esperar_procesando(page, segundos=60):
     que se traga todos los clics. Si no se espera, cualquier accion falla
     con 'intercepts pointer events'.
     """
+    cerrar_aviso(page)
     for _ in range(segundos * 2):
         capa = page.locator("text=/Processing/i")
         try:
@@ -450,10 +504,19 @@ def seleccionar_todo(page):
     page.wait_for_timeout(800)
 
     def pulsar():
+        # Nunca force=True a ciegas: si hay un aviso encima, el clic se lo
+        # lleva el modal y la casilla no se entera.
+        cerrar_aviso(page)
         try:
-            cab.click(timeout=10_000, force=True)
+            cab.click(timeout=10_000)
             return True
         except Exception:
+            if cerrar_aviso(page):
+                try:
+                    cab.click(timeout=10_000)
+                    return True
+                except Exception:
+                    pass
             caja = cab.bounding_box()
             if caja:
                 page.mouse.click(caja["x"] + caja["width"] / 2,
@@ -466,6 +529,25 @@ def seleccionar_todo(page):
             log(f"   intento {intento}: no pude pulsar la casilla")
             break
         page.wait_for_timeout(2500)
+        # Aqui aparece el aviso de registros inexistentes: la tabla se
+        # recargo mientras se bajaba y los ids que envio el navegador son de
+        # la carga anterior. Se cierra y se vuelve a recorrer la tabla, que
+        # es lo unico que devuelve ids validos.
+        if cerrar_aviso(page):
+            log("   los identificadores estaban vencidos; recargo la tabla")
+            esperar_procesando(page)
+            total = bajar_hasta_el_final(page)
+            page.evaluate("""() => {
+                const tbl = document.querySelector('table.table-striped');
+                const th  = tbl ? tbl.querySelector('thead') : null;
+                if (th) th.scrollIntoView({block: 'center'});
+                window.scrollBy(0, -200);
+            }""")
+            page.wait_for_timeout(1500)
+            cab = casilla_codigo(page)
+            if cab is None:
+                break
+            continue
         esperar_procesando(page)
         n = marcadas(page)
         estado = cab.evaluate("el => el.indeterminate ? 'intermedio' : "
@@ -489,8 +571,10 @@ def imprimir(page, opcion, destino):
     if not boton.count():
         captura(page, "sin_boton_imprimir")
         raise SystemExit("No encontré el botón de impresión en la barra.")
+    cerrar_aviso(page)
     boton.click(timeout=15_000)
     page.wait_for_timeout(1200)
+    cerrar_aviso(page)
     captura(page, "menu_impresion")
     item = page.locator(f"text='{opcion}'").first
     if not item.count():
@@ -535,6 +619,7 @@ def limpiar_seleccion(page):
     lo predecible; la casilla de la cabecera solo se toca si quedan
     muchas, porque su comportamiento depende de en que estado este.
     """
+    cerrar_aviso(page)
     n = marcadas(page)
     if n == 0:
         return
@@ -627,8 +712,10 @@ def descargar_detalle(page, codigo):
     try:
         casilla.check(timeout=10_000)
     except Exception:
+        cerrar_aviso(page)
         casilla.click(timeout=10_000, force=True)
     page.wait_for_timeout(1000)
+    cerrar_aviso(page)
 
     n = marcadas(page)
     if n != 1:
@@ -813,6 +900,12 @@ def main():
             log(f"Listo en {time.time() - inicio:.0f} s")
         except Exception:
             captura(page, "error")
+            try:
+                with open(os.path.join(CAPTURAS, "error.html"), "w",
+                          encoding="utf-8") as f:
+                    f.write(page.content())
+            except Exception:
+                pass
             raise
         finally:
             ctx.close()
