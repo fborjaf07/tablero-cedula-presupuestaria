@@ -121,6 +121,9 @@ def certificaciones(bloque):
         "fecha": "", "ultimo": "", "f_comprometido": "", "f_devengado": "",
         "certificado": 0.0, "comprometido": 0.0,
         "devengado": 0.0, "pagado": 0.0, "documentos": [], "movimientos": 0,
+        # flujo por mes de cada certificacion: es lo que permite que la lista
+        # de proyectos de un mes sume exactamente el devengado de ese mes
+        "por_mes": {},
     })
     for m in bloque["movimientos"]:
         clave = m["certificacion"] or m["documento"] or "(sin certificación)"
@@ -129,6 +132,16 @@ def certificaciones(bloque):
         for k in ("certificado", "comprometido", "devengado", "pagado"):
             g[k] = round(g[k] + m[k], 2)
         g["movimientos"] += 1
+        mes = (m["fecha"] or "")[:7]
+        if len(mes) == 7:
+            pm = g["por_mes"].setdefault(mes, {"certificado": 0.0,
+                                               "comprometido": 0.0,
+                                               "devengado": 0.0,
+                                               "f_devengado": ""})
+            for k in ("certificado", "comprometido", "devengado"):
+                pm[k] = round(pm[k] + m[k], 2)
+            if m["devengado"] and m["fecha"] > pm["f_devengado"]:
+                pm["f_devengado"] = m["fecha"]
         if not g["fecha"] or (m["fecha"] and m["fecha"] < g["fecha"]):
             g["fecha"] = m["fecha"]
         # el ultimo movimiento es lo que marca si el expediente sigue vivo
@@ -378,6 +391,9 @@ def proyectos_desde_detalle(grupos):
                     "ultimo": c["ultimo"],
                     "f_comprometido": c["f_comprometido"],
                     "f_devengado": c["f_devengado"],
+                    "por_mes": {k: v for k, v in c["por_mes"].items()
+                                if any(abs(v[x]) > 0.005 for x in
+                                       ("certificado", "comprometido", "devengado"))},
                     "saldo": False,
                     "codificado": c["certificado"],
                     "certificado": c["certificado"],
