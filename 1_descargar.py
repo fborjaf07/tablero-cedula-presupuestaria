@@ -563,38 +563,114 @@ def seleccionar_todo(page):
     return marcadas(page)
 
 
-def imprimir(page, opcion, destino):
-    """Abre el menú de impresión, elige una opción y guarda la descarga."""
-    esperar_procesando(page)
-    boton = page.locator("[title*='mprimir'], button:has(i.fa-print), "
-                         "[class*='print']").first
-    if not boton.count():
-        captura(page, "sin_boton_imprimir")
-        raise SystemExit("No encontré el botón de impresión en la barra.")
-    cerrar_aviso(page)
-    boton.click(timeout=15_000)
-    page.wait_for_timeout(1200)
-    cerrar_aviso(page)
-    captura(page, "menu_impresion")
-    item = page.locator(f"text='{opcion}'").first
-    if not item.count():
-        opciones = page.locator("li:visible, a:visible").all_inner_texts()
-        log("   opciones del menú: " + " | ".join(
-            o.strip() for o in opciones if o.strip())[:400])
-        raise SystemExit(f"No encontré «{opcion}» en el menú de impresión. "
-                         f"Revise menu_impresion.png")
-    with page.expect_download(timeout=180_000) as info:
-        item.click()
-    descarga = info.value
-    os.makedirs(os.path.dirname(destino), exist_ok=True)
-    descarga.save_as(destino)
-    return destino
+def esperar_descarga(page, accion, segundos):
+    """Ejecuta la accion y espera una descarga en cualquier pestaña.
+
+    eGob a veces entrega el reporte en una pestaña nueva y no en la
+    actual; page.expect_download solo escucha la actual y por eso se
+    agotaba el tiempo. Aqui se escucha todo el contexto. Si mientras se
+    espera aparece el aviso de registros inexistentes, se corta en el
+    acto: esa descarga ya no va a llegar.
+
+    Devuelve (descarga, motivo): motivo es None, 'aviso' o 'tiempo'.
+    """
+    ctx = page.context
+    llegadas, enganches = [], []
+
+    def enganchar(p):
+        f = lambda d: llegadas.append(d)
+        p.on("download", f)
+        enganches.append((p, f))
+
+    for p in ctx.pages:
+        enganchar(p)
+    ctx.on("page", enganchar)
+    try:
+        accion()
+        fin = time.time() + segundos
+        while time.time() < fin:
+            if llegadas:
+                return llegadas[0], None
+            page.wait_for_timeout(1000)
+            if cerrar_aviso(page):
+                return None, "aviso"
+        return None, "tiempo"
+    finally:
+        try:
+            ctx.remove_listener("page", enganchar)
+        except Exception:
+            pass
+        for p, f in enganches:
+            try:
+                p.remove_listener("download", f)
+            except Exception:
+                pass
+
+
+def cerrar_pestanas_extra(page):
+    for p in page.context.pages:
+        if p is not page:
+            try:
+                p.close()
+            except Exception:
+                pass
+
+
+def imprimir(page, opcion, destino, reintentos=3, al_vencer=None, segundos=150):
+    """Abre el menú de impresión, elige una opción y guarda la descarga.
+
+    Si la descarga no llega, reintenta. Cuando la causa es el aviso de
+    identificadores vencidos, llama a al_vencer (p. ej. volver a
+    seleccionar todo) antes del siguiente intento.
+    """
+    for intento in range(1, reintentos + 1):
+        esperar_procesando(page)
+        boton = page.locator("[title*='mprimir'], button:has(i.fa-print), "
+                             "[class*='print']").first
+        if not boton.count():
+            captura(page, "sin_boton_imprimir")
+            raise SystemExit("No encontré el botón de impresión en la barra.")
+        cerrar_aviso(page)
+        boton.click(timeout=15_000)
+        page.wait_for_timeout(1200)
+        cerrar_aviso(page)
+        captura(page, f"menu_impresion_{intento}")
+        item = page.locator(f"text='{opcion}'").first
+        if not item.count():
+            opciones = page.locator("li:visible, a:visible").all_inner_texts()
+            log("   opciones del menú: " + " | ".join(
+                o.strip() for o in opciones if o.strip())[:400])
+            raise SystemExit(f"No encontré «{opcion}» en el menú de impresión. "
+                             f"Revise menu_impresion_{intento}.png")
+
+        t0 = time.time()
+        descarga, motivo = esperar_descarga(page, lambda: item.click(), segundos)
+        if descarga:
+            os.makedirs(os.path.dirname(destino), exist_ok=True)
+            descarga.save_as(destino)
+            log(f"   descarga en {time.time() - t0:.0f} s (intento {intento})")
+            cerrar_pestanas_extra(page)
+            return destino
+
+        captura(page, f"sin_descarga_{intento}")
+        log(f"   intento {intento}: no llegó «{opcion}» ({motivo}, "
+            f"{time.time() - t0:.0f} s); pestañas abiertas: {len(page.context.pages)}")
+        cerrar_pestanas_extra(page)
+        page.keyboard.press("Escape")
+        page.wait_for_timeout(1500)
+        if motivo == "aviso" and al_vencer and intento < reintentos:
+            log("   identificadores vencidos: vuelvo a seleccionar")
+            al_vencer()
+
+    raise SystemExit(f"eGob no entregó «{opcion}» tras {reintentos} intentos. "
+                     f"Revise las capturas sin_descarga_*.png")
 
 
 def descargar_partidas(page):
     log("6. Descargando Partida XLS")
     destino = os.path.join(DATOS, "partidas.xls")
-    imprimir(page, "Partida XLS", destino)
+    imprimir(page, "Partida XLS", destino,
+             al_vencer=lambda: seleccionar_todo(page))
     tam = os.path.getsize(destino)
     log(f"   {destino} ({tam:,} bytes)")
     captura(page, "partida_xls")
