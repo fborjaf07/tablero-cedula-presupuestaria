@@ -376,6 +376,8 @@ def cerrar_aviso(page):
             return False
     except Exception:
         return False
+    if modal_descarga(page) and pulsar_modal_descarga(page):
+        return False
 
     try:
         texto = (dlg.inner_text() or "").strip().replace(chr(10), " ")[:160]
@@ -563,6 +565,47 @@ def seleccionar_todo(page):
     return marcadas(page)
 
 
+def modal_descarga(page):
+    """El modal «Descargar ...» con el que eGob entrega reportes grandes."""
+    dlg = page.locator(AVISO).first
+    try:
+        if dlg.count() and dlg.is_visible():
+            t = (dlg.inner_text() or "").strip().lower()
+            if t.startswith("descargar") or "descargar detalle" in t or "descargar partida" in t:
+                return dlg
+    except Exception:
+        pass
+    return None
+
+
+def pulsar_modal_descarga(page):
+    """Pulsa el enlace o botón de descarga dentro del modal. True si lo hizo."""
+    dlg = modal_descarga(page)
+    if not dlg:
+        return False
+    captura(page, "modal_descarga")
+    for sel in ["a[href*='download']", "a[href*='web/content']", "a[download]",
+                "a:has-text('.xls')", "a:has-text('.pdf')",
+                "button:has-text('Descargar')", "a:has-text('Descargar')",
+                ".modal-body a[href]", ".modal-footer button.btn-primary",
+                ".modal-footer a", ".modal-footer button"]:
+        b = dlg.locator(sel).first
+        try:
+            if b.count() and b.is_visible():
+                log(f"   modal de descarga de eGob: pulso «{sel}»")
+                b.click(timeout=10_000)
+                page.wait_for_timeout(2000)
+                return True
+        except Exception:
+            continue
+    try:
+        html = dlg.inner_html()[:600].replace(chr(10), " ")
+        log("   ! modal de descarga sin enlace reconocible: " + html)
+    except Exception:
+        pass
+    return False
+
+
 def esperar_descarga(page, accion, segundos):
     """Ejecuta la accion y espera una descarga en cualquier pestaña.
 
@@ -588,10 +631,18 @@ def esperar_descarga(page, accion, segundos):
     try:
         accion()
         fin = time.time() + segundos
+        pulsados = 0
         while time.time() < fin:
             if llegadas:
                 return llegadas[0], None
             page.wait_for_timeout(1000)
+            # Los reportes grandes no bajan solos: eGob abre un modal
+            # «Descargar <nombre>» con el enlace al archivo. Ese modal NO es
+            # un error; hay que pulsar su enlace y seguir esperando.
+            if pulsados < 3 and pulsar_modal_descarga(page):
+                pulsados += 1
+                fin = max(fin, time.time() + 90)
+                continue
             if cerrar_aviso(page):
                 return None, "aviso"
         return None, "tiempo"
