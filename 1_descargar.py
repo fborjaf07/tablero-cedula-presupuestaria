@@ -571,6 +571,8 @@ def modal_descarga(page):
     try:
         if dlg.count() and dlg.is_visible():
             t = (dlg.inner_text() or "").strip().lower()
+            if "ya no existen" in t:
+                return None
             if t.startswith("descargar") or "descargar detalle" in t or "descargar partida" in t:
                 return dlg
     except Exception:
@@ -717,11 +719,32 @@ def imprimir(page, opcion, destino, reintentos=3, al_vencer=None, segundos=150):
                      f"Revise las capturas sin_descarga_*.png")
 
 
+def rehacer_consulta(page, espera=45):
+    """Vuelve a abrir la consulta desde cero para tener identificadores nuevos.
+
+    El aviso «registros ... que ya no existen» significa que eGob recalculó
+    la cédula y los ids que guarda la pantalla son de la carga anterior.
+    Volver a bajar por la misma tabla no sirve: sigue con los ids viejos
+    (se queda en 100 filas y marca 40). Hay que recargar la página, dar
+    tiempo a que eGob termine de recalcular y repetir el filtro.
+    """
+    log(f"   recargo la consulta desde cero (espero {espera} s a que eGob recalcule)")
+    cerrar_aviso(page)
+    page.wait_for_timeout(espera * 1000)
+    page.reload(wait_until="domcontentloaded", timeout=ESPERA)
+    page.wait_for_load_state("networkidle", timeout=ESPERA)
+    page.wait_for_selector("input[placeholder*='cci'], input[placeholder*='cción']",
+                           timeout=ESPERA)
+    abrir_consulta(page)
+    filtrar(page)
+    seleccionar_todo(page)
+
+
 def descargar_partidas(page):
     log("6. Descargando Partida XLS")
     destino = os.path.join(DATOS, "partidas.xls")
-    imprimir(page, "Partida XLS", destino,
-             al_vencer=lambda: seleccionar_todo(page))
+    imprimir(page, "Partida XLS", destino, reintentos=4,
+             al_vencer=lambda: rehacer_consulta(page))
     tam = os.path.getsize(destino)
     log(f"   {destino} ({tam:,} bytes)")
     captura(page, "partida_xls")
